@@ -1,0 +1,11 @@
+[package]
+name = "log_process_cli"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+rust_xlsxwriter = "0.92.2"
+anyhow = "1"
+walkdir = "2.5.0"
+rayon = "1.11.0"
+clap = { version = "4", features = ["derive"] }
