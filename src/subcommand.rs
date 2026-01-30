@@ -1,15 +1,17 @@
-use anyhow::{self, Ok, Result};
+use anyhow::{self, Ok, Result, bail};
 use rayon::prelude::*;
 use std::{
     fs,
     path::{Path, PathBuf},
+    sync::{Mutex, OnceLock},
 };
 
 use clap::Parser;
+use serde::{Deserialize, Serialize};
 use std::sync::LazyLock;
 use walkdir::{DirEntry, WalkDir};
 
-pub static DEFAULT_FILTERS: LazyLock<Vec<String>> = LazyLock::new(|| {
+static DEFAULT_FILTERS: LazyLock<Vec<String>> = LazyLock::new(|| {
     vec![
         "tid:".to_string(),
         "pid:".to_string(),
@@ -17,11 +19,15 @@ pub static DEFAULT_FILTERS: LazyLock<Vec<String>> = LazyLock::new(|| {
     ]
 });
 
-static BASE_DIR: LazyLock<PathBuf> = LazyLock::new(|| {
-    PathBuf::from(
-        "D:/project/日照港卸料小车项目/code/unload_modeling/build/bin/RelWithDebInfo/log/",
-    )
-});
+static CONFIG_PATH: LazyLock<PathBuf> = LazyLock::new(|| PathBuf::from("config/config.json"));
+
+static BASE_DIR: OnceLock<Mutex<PathBuf>> = OnceLock::new();
+
+#[derive(Parser)]
+pub struct BaseDirArgs {
+    // 文件夹路径
+    pub path: PathBuf,
+}
 
 #[derive(Parser)]
 pub struct CheckLineArgs {
@@ -43,17 +49,79 @@ pub struct RemoveLineArgs {
     /// 需要过滤的关键字
     #[arg(short, long)]
     pub filters: Option<Vec<String>>,
+
+    /// 需要过滤掉还是保留指定的关键字
+    #[arg(short, long, default_value_t = false)]
+    pub keep: bool,
 }
 
 #[derive(Parser)]
-pub struct RemoveFileArgs {}
+pub struct RemoveFileArgs {
+    /// 文件路径
+    pub path: PathBuf,
+}
+
+#[derive(Serialize, Deserialize)]
+struct Config {
+    base_dir: PathBuf,
+}
+
+pub fn get_base_dir_locked() -> Result<&'static Mutex<PathBuf>> {
+    let config = fs::read_to_string(CONFIG_PATH.as_path())?;
+    let config: Config = serde_json::from_str(&config)?;
+    let base_dir = BASE_DIR.get_or_init(|| Mutex::new(config.base_dir));
+
+    Ok(base_dir)
+}
+
+fn config_base_dir<P: AsRef<Path>>(base_dir: P) -> Result<()> {
+    let config = Config {
+        base_dir: base_dir.as_ref().to_path_buf(),
+    };
+
+    let config = serde_json::to_string_pretty(&config)?;
+    println!("config: {config:#?}");
+    fs::write(CONFIG_PATH.as_path(), config)?;
+
+    Ok(())
+}
+
+pub fn set_base_dir(args: BaseDirArgs) -> Result<()> {
+    if !args.path.exists() {
+        bail!("❌ input path not exists");
+    }
+
+    if !args.path.is_dir() {
+        bail!("❌ input path is not a directory");
+    }
+
+    config_base_dir(&args.path)?;
+    println!("base dir set to: {}", args.path.display());
+
+    Ok(())
+}
+
+pub fn get_base_dir() -> Result<BaseDirArgs> {
+    let base_dir = get_base_dir_locked()?.lock().unwrap();
+
+    Ok(BaseDirArgs {
+        path: base_dir.to_path_buf(),
+    })
+}
 
 pub fn process_check_line(args: CheckLineArgs) -> Result<()> {
     let path = if args.path.is_absolute() {
         args.path
     } else {
-        BASE_DIR.join(&args.path)
+        let base_dir = get_base_dir_locked()?.lock().unwrap();
+        base_dir.join(&args.path)
     };
+
+    println!("path:{}", path.display());
+
+    if !path.exists() {
+        bail!("❌ {} not exists", path.display());
+    }
 
     let filters = args.filters.unwrap_or(DEFAULT_FILTERS.to_vec());
 
@@ -66,13 +134,58 @@ pub fn process_check_line(args: CheckLineArgs) -> Result<()> {
     Ok(())
 }
 
+pub fn process_remove_line(args: RemoveLineArgs) -> Result<()> {
+    let path = if args.path.is_absolute() {
+        args.path
+    } else {
+        let base_dir = get_base_dir_locked()?.lock().unwrap();
+        base_dir.join(&args.path)
+    };
+
+    if !path.exists() {
+        bail!("❌ {} not exists", path.display());
+    }
+
+    let filters = args.filters.unwrap_or(DEFAULT_FILTERS.to_vec());
+    let keep = args.keep;
+
+    if path.is_dir() {
+        remove_log_dir_cpu_mem_infos(&path, &filters, keep);
+    } else {
+        remove_log_file_cpu_mem_info(&path, &filters, keep)?;
+    }
+
+    Ok(())
+}
+
+pub fn process_remove_file(args: RemoveFileArgs) -> Result<()> {
+    let path = if args.path.is_absolute() {
+        args.path
+    } else {
+        let base_dir = get_base_dir_locked()?.lock().unwrap();
+        base_dir.join(&args.path)
+    };
+
+    if !path.exists() {
+        bail!("❌ {} not exists", path.display());
+    }
+
+    if path.is_dir() {
+        fs::remove_dir_all(path)?;
+    } else {
+        fs::remove_file(&path)?;
+    }
+
+    Ok(())
+}
+
 fn check_log_dir_cpu_mem_infos<P: AsRef<Path>>(dir: P, filters: &[String]) {
     let entries = get_entries(dir);
 
     entries.par_iter().for_each(|e| {
         let file_path = e.path();
         if let Err(e) = check_log_file_cpu_mem_info(file_path, filters) {
-            println!("❌check line failed, path {:?}, reason: {}", file_path, e);
+            println!("❌ check line failed, path {:?}, reason: {}", file_path, e);
         }
     });
 }
@@ -93,31 +206,13 @@ fn check_log_file_cpu_mem_info<P: AsRef<Path>>(path: P, filters: &[String]) -> R
     Ok(())
 }
 
-pub fn process_remove_line(args: RemoveLineArgs) -> Result<()> {
-    let path = if args.path.is_absolute() {
-        args.path
-    } else {
-        BASE_DIR.join(&args.path)
-    };
-
-    let filters = args.filters.unwrap_or(DEFAULT_FILTERS.to_vec());
-
-    if path.is_dir() {
-        remove_log_dir_cpu_mem_infos(&path, &filters);
-    } else {
-        remove_log_file_cpu_mem_info(&path, &filters)?;
-    }
-
-    Ok(())
-}
-
-fn remove_log_dir_cpu_mem_infos<P: AsRef<Path>>(dir: P, filters: &[String]) {
+fn remove_log_dir_cpu_mem_infos<P: AsRef<Path>>(dir: P, filters: &[String], keep: bool) {
     let entries = get_entries(dir);
 
     entries.par_iter().for_each(|e| {
         let file_path = e.path();
-        if let Err(e) = remove_log_file_cpu_mem_info(file_path, filters) {
-            println!("❌remove line failed, path {:?}, reason: {}", file_path, e);
+        if let Err(e) = remove_log_file_cpu_mem_info(file_path, filters, keep) {
+            println!("❌ remove line failed, path {:?}, reason: {}", file_path, e);
         }
     });
 }
@@ -135,11 +230,17 @@ fn get_entries<P: AsRef<Path>>(dir: P) -> Vec<DirEntry> {
         .collect::<Vec<_>>()
 }
 
-fn remove_log_file_cpu_mem_info<P: AsRef<Path>>(path: P, filters: &[String]) -> Result<()> {
+fn remove_log_file_cpu_mem_info<P: AsRef<Path>>(path: P, filters: &[String], keep: bool) -> Result<()> {
     let content = fs::read_to_string(&path)?;
     let lines = content
         .lines()
-        .filter(|&s| filter_keyword(s, filters))
+        .filter(|&s|{
+            if keep {
+                contains_keyword(s, filters)
+            } else {
+                filter_keyword(s, filters)
+            }
+        })
         .map(|s| format!("{s}\n"))
         .collect::<String>();
 

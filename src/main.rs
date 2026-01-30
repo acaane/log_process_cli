@@ -4,13 +4,14 @@ use anyhow::{Ok, Result, anyhow};
 use clap::{Parser, Subcommand};
 use rust_xlsxwriter::workbook::Workbook;
 use subcommand::{
-    CheckLineArgs, RemoveFileArgs, RemoveLineArgs, process_check_line, process_remove_line,
+    BaseDirArgs, CheckLineArgs, RemoveFileArgs, RemoveLineArgs, get_base_dir, process_check_line,
+    process_remove_file, process_remove_line, set_base_dir,
 };
 
 mod subcommand;
 
 #[derive(Parser)]
-#[command(name = "log processor", version, about = "简单日志处理工具")]
+#[command(name = "lp", version, about = "简单日志处理工具")]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -19,6 +20,14 @@ struct Cli {
 /// 子命令集合
 #[derive(Subcommand)]
 enum Commands {
+    /// 设置要操作文件的根路径
+    #[command(name = "sbd", alias = "set_bd")]
+    SetBaseDir(BaseDirArgs),
+
+    /// 获取当前的根路径
+    #[command(name = "gbd", alias = "get_bd")]
+    GetBaseDir,
+
     /// 检查日志内容
     #[command(name = "cl", alias = "cl_ln")]
     CheckLine(CheckLineArgs),
@@ -28,6 +37,7 @@ enum Commands {
     RemoveLine(RemoveLineArgs),
 
     /// 删除文件
+    #[command(name = "rf", alias = "rm_f")]
     RemoveFile(RemoveFileArgs),
 }
 
@@ -38,13 +48,21 @@ fn main() -> Result<()> {
 
     let args = Cli::parse();
     match args.command {
+        Commands::SetBaseDir(args) => {
+            set_base_dir(args)?;
+        }
+        Commands::GetBaseDir => {
+            println!("{}", get_base_dir()?.path.display());
+        }
         Commands::CheckLine(args) => {
             process_check_line(args)?;
         }
         Commands::RemoveLine(args) => {
             process_remove_line(args)?;
         }
-        Commands::RemoveFile(args) => {}
+        Commands::RemoveFile(args) => {
+            process_remove_file(args)?;
+        }
     }
 
     Ok(())
